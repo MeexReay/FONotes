@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "stknts"
+name = "fonotes"
 version = "0.1.0"
