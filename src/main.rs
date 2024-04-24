@@ -1,13 +1,18 @@
+use std::iter::Zip;
 use std::num::NonZeroU32;
 
+use fontdue::Font;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use softbuffer::{Context, Surface};
 use arboard::{Clipboard, ImageData};
 
-use winit::event::{Event, WindowEvent, KeyEvent, ElementState};
+use winit::event::{ElementState, Event, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::window::{WindowBuilder, WindowButtons, WindowLevel};
+use winit::dpi::PhysicalPosition;
+use winit::window::CursorIcon;
+use winit::window::ResizeDirection;
 
 use rdev::*;
 
@@ -37,16 +42,47 @@ fn get_clipboard(clipboard: &mut Clipboard) -> ClipboardContent {
     }
 }
 
+fn render_text(text: String, size: f32, font: Font) -> Pixmap {
+    let mut chars: Vec<((usize, usize), Vec<u8>)> = Vec::new();
+    for ele in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ele, size);
+        chars.push(((metrics.width, metrics.height), bitmap));
+    }
+
+    let width: usize = chars.iter().map(|i| i.0.0).sum();
+    let height: usize = chars.iter().map(|i| i.0.1).sum();
+    let mut pixmap = Pixmap::new(width as u32, height as u32).unwrap();
+
+    for ele in chars {
+        let mut i: u32 = 0;
+        for x in 0..(ele.0.0) {
+            for y in 0..(ele.0.1) {
+                
+
+                i += 1;
+            }
+        }
+    }
+
+    pixmap
+}
+
 fn popup_clipboard(content: ClipboardContent) {
     let event_loop = EventLoopBuilder::new().with_any_thread(true).build().unwrap();
     let window = WindowBuilder::new()
         .with_enabled_buttons(WindowButtons::empty())
-        .with_window_level(WindowLevel::AlwaysOnTop)
         .with_decorations(false)
-        .with_title("My Window")
+        .with_window_level(WindowLevel::AlwaysOnTop)
+        .with_title("FONotes - ".to_owned() + (match content {
+            ClipboardContent::Image(_) => "Image",
+            ClipboardContent::Text(_) => "Text",
+            _ => "???"
+        }))
         .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0))
         .with_resizable(true)
         .with_visible(true)
+        .with_min_inner_size(winit::dpi::LogicalSize::new(50.0, 50.0))
+        // .with_resize_increments((0,0))
         .build(&event_loop).unwrap();
 
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -55,23 +91,72 @@ fn popup_clipboard(content: ClipboardContent) {
     let context = Context::new(&window).unwrap();
     let mut surface = Surface::new(&context, &window).unwrap();
 
+    let mut mouse_pos = PhysicalPosition::new(0.0, 0.0);
+
     event_loop.run(|event, elwt| {
         match event {
-            Event::Resumed => {
-                dbg!("what");
-            },
+            Event::Resumed => {},
             Event::WindowEvent { window_id, event } => match event {
                 WindowEvent::CloseRequested => {
                     elwt.exit();
                 },
                 WindowEvent::MouseInput { device_id, state, button } => {
-                    dbg!((device_id, state, button));
+                    // dbg!((device_id, state, button));
+
+                    let (width, height) = {
+                        let size = window.inner_size();
+                        (size.width as f64, size.height as f64)
+                    };
+
+                    if button == MouseButton::Left && state.is_pressed() {
+                        if mouse_pos.x > width - 30.0 && mouse_pos.y < 30.0 {         // close button
+                            elwt.exit();
+                        } else if mouse_pos.x < 20.0 && mouse_pos.y < 20.0 {          // west north
+                            window.drag_resize_window(ResizeDirection::NorthWest).unwrap();
+                        } else if mouse_pos.x < 20.0 && mouse_pos.y > height - 20.0 { // west south
+                            window.drag_resize_window(ResizeDirection::SouthWest).unwrap();
+                        } else if mouse_pos.x > width - 20.0 && mouse_pos.y < 20.0 {  // east north
+                            window.drag_resize_window(ResizeDirection::NorthEast).unwrap();
+                        } else if mouse_pos.x > width - 20.0 && mouse_pos.y > height - 20.0 { // east south
+                            window.drag_resize_window(ResizeDirection::SouthEast).unwrap();
+                        } else if mouse_pos.y < 20.0 && mouse_pos.x < 20.0 {          // north west
+                            window.drag_resize_window(ResizeDirection::NorthWest).unwrap();
+                        } else if mouse_pos.y < 20.0 && mouse_pos.x > width - 20.0 {  // north east
+                            window.drag_resize_window(ResizeDirection::NorthEast).unwrap();
+                        } else if mouse_pos.y > height - 20.0 && mouse_pos.x < 20.0 { // south west
+                            window.drag_resize_window(ResizeDirection::SouthWest).unwrap();
+                        } else if mouse_pos.y > height - 20.0 && mouse_pos.x > width - 20.0 { // south east
+                            window.drag_resize_window(ResizeDirection::SouthEast).unwrap();
+                        } else if mouse_pos.x < 20.0 {                                // west
+                            window.drag_resize_window(ResizeDirection::West).unwrap();
+                        } else if mouse_pos.x > width - 20.0 {                        // east
+                            window.drag_resize_window(ResizeDirection::East).unwrap();
+                        } else if mouse_pos.y > height - 20.0 {                       // south
+                            window.drag_resize_window(ResizeDirection::South).unwrap();
+                        } else if mouse_pos.y < 20.0 {                                // north
+                            window.drag_resize_window(ResizeDirection::North).unwrap();
+                        } else {                                                      // else
+                            window.drag_window();
+                        }
+                    }
                 },
                 WindowEvent::CursorMoved { device_id, position } => {
-                    dbg!((device_id, position));
-                },
-                WindowEvent::CursorEntered { device_id } => {
-                    println!("cursor entered in the window {window_id:?}");
+                    mouse_pos = position;
+
+                    let (width, height) = {
+                        let size = window.inner_size();
+                        (size.width as f64, size.height as f64)
+                    };
+
+                    if position.x > width - 30.0 && position.y < 30.0 {
+                        window.set_cursor_icon(CursorIcon::Pointer);
+                    } else if position.x < 20.0 || position.x > width - 20.0 {
+                        window.set_cursor_icon(CursorIcon::EwResize)
+                    } else if position.y < 20.0 || position.y > height - 20.0 {
+                        window.set_cursor_icon(CursorIcon::NsResize)
+                    } else {
+                        window.set_cursor_icon(CursorIcon::Pointer);
+                    }
                 },
                 WindowEvent::RedrawRequested => {
                     let (width, height) = {                        // объявляем переменные
@@ -87,6 +172,8 @@ fn popup_clipboard(content: ClipboardContent) {
     
                     let mut pixmap = Pixmap::new(width, height).unwrap(); // берем 
                     pixmap.fill(Color::WHITE);
+
+
     
                     let mut buffer = surface.buffer_mut().unwrap();
                     for index in 0..(width * height) as usize {
@@ -102,6 +189,8 @@ fn popup_clipboard(content: ClipboardContent) {
             _ => (),
         }
     }).unwrap();
+
+    window.set_visible(false);
 }
 
 fn main() {
