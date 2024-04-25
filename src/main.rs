@@ -1,57 +1,45 @@
-use std::collections::HashMap;
-use std::iter::Zip;
-use std::num::NonZeroU32;
-use std::ops::Deref;
-use std::os::linux::raw::stat;
-use send_wrapper::SendWrapper;
-use std::sync::mpsc::channel;
 use std::cmp;
+use std::num::NonZeroU32;
 
-use fontdue::{Font, FontSettings};
-use fontdue::layout::{Layout, CoordinateSystem, TextStyle};
-use tiny_skia::{Color, ColorU8, FillRule, Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Rect, Stroke, Transform};
-use softbuffer::{Context, Surface};
 use arboard::{Clipboard, ImageData};
+use fontdue::layout::{CoordinateSystem, Layout, TextStyle};
+use fontdue::{Font, FontSettings};
+use softbuffer::{Context, Surface};
+use tiny_skia::{
+    Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect,
+    Transform,
+};
 
-use winit::event::{ElementState, Event, KeyEvent, MouseButton, WindowEvent};
+use winit::dpi::LogicalSize;
+use winit::dpi::PhysicalPosition;
+use winit::event::{Event, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use winit::platform::x11::EventLoopBuilderExtX11;
-use winit::window::{Window, WindowBuilder, WindowButtons, WindowId, WindowLevel};
-use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::window::CursorIcon;
 use winit::window::ResizeDirection;
-use winit::dpi::LogicalSize;
+use winit::window::{Window, WindowBuilder, WindowButtons, WindowId, WindowLevel};
 
 use rdev::*;
 
-use std::thread::{self, JoinHandle};
-use std::sync::{Arc,Mutex,MutexGuard};
-use std::borrow::{BorrowMut, Cow};
-use std::cell::{Cell, Ref};
-use std::cell::{RefCell, RefMut};
-use std::rc::Rc;
 use core::slice::IterMut;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::thread;
 
 #[derive(Debug)]
 enum ClipboardContent {
     Image(ImageData<'static>),
     Text(String),
-    None
+    None,
 }
 
 fn get_clipboard(clipboard: &mut Clipboard) -> ClipboardContent {
     match clipboard.get_image() {
-        Ok(i) => {
-            ClipboardContent::Image(i.to_owned_img())
-        }, Err(e) => {
-            match clipboard.get_text() {
-                Ok(i) => {
-                    ClipboardContent::Text(i)
-                }, Err(e) => {
-                    ClipboardContent::None
-                }
-            }
-        }
+        Ok(i) => ClipboardContent::Image(i.to_owned_img()),
+        Err(_) => match clipboard.get_text() {
+            Ok(i) => ClipboardContent::Text(i),
+            Err(_) => ClipboardContent::None,
+        },
     }
 }
 
@@ -93,13 +81,17 @@ fn render_text(text: String, font_size: f32, font: &Font, color: Color) -> Pixma
 
         let rendered = render_char(ch, font_size, font, color);
         text_width = gl.x as i32 + gl.width as i32;
-        if height > max_height { max_height = height; }
+        if height > max_height {
+            max_height = height;
+        }
         chars.push((rendered, gl.x, gl.y));
     }
 
     let mut pixmap = match Pixmap::new(text_width as u32, max_height as u32) {
-        Some(i) => {i},
-        None => { return Pixmap::new(1, 1).unwrap(); },
+        Some(i) => i,
+        None => {
+            return Pixmap::new(1, 1).unwrap();
+        }
     };
     let paint = PixmapPaint::default();
 
@@ -108,23 +100,32 @@ fn render_text(text: String, font_size: f32, font: &Font, color: Color) -> Pixma
         let pos = (jujuk.1, jujuk.2);
 
         pixmap.draw_pixmap(
-            pos.0 as i32, 
-            pos.1 as i32, 
-            ele.as_ref(), 
-            &paint, 
-            Transform::identity(), 
-            None);
+            pos.0 as i32,
+            pos.1 as i32,
+            ele.as_ref(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
     }
 
     pixmap
 }
 
-fn render_text_with_ln(text: String, size: f32, font: &Font, line_height: i32, color: Color) -> Pixmap {
+fn render_text_with_ln(
+    text: String,
+    size: f32,
+    font: &Font,
+    line_height: i32,
+    color: Color,
+) -> Pixmap {
     let mut width = 0;
     let mut lines: Vec<Pixmap> = Vec::new();
     for ele in text.split("\n") {
         let rendered = render_text(ele.to_string(), size, font, color);
-        if rendered.width() > width { width = rendered.width(); }
+        if rendered.width() > width {
+            width = rendered.width();
+        }
         lines.push(rendered);
     }
     let height = (line_height * lines.len() as i32) as i32;
@@ -134,7 +135,14 @@ fn render_text_with_ln(text: String, size: f32, font: &Font, line_height: i32, c
 
     let mut y: i32 = 0;
     for ele in lines {
-        pixmap.draw_pixmap(0, (y + (line_height - ele.height() as i32)) as i32, ele.as_ref(), &paint, Transform::identity(), None);
+        pixmap.draw_pixmap(
+            0,
+            (y + (line_height - ele.height() as i32)) as i32,
+            ele.as_ref(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
         y += line_height;
     }
 
@@ -152,7 +160,8 @@ fn render_image(image: ImageData<'static>) -> Pixmap {
 
 pub trait RemoveElem<T: PartialEq> {
     fn remove_elem<F>(&mut self, predicate: F) -> Option<T>
-    where F: Fn(&T) -> bool;
+    where
+        F: Fn(&T) -> bool;
 
     fn remove_value(&mut self, value: &T) -> Option<T>;
 }
@@ -168,17 +177,16 @@ impl<T: PartialEq> RemoveElem<T> for Vec<T> {
     }
 
     fn remove_value(&mut self, value: &T) -> Option<T> {
-        self.remove_elem(|e|{e == value})
+        self.remove_elem(|e| e == value)
     }
 }
 
 struct Note {
     window: Arc<Window>,
     window_id: WindowId,
-    context: Context<Arc<Window>>,
     surface: Surface<Arc<Window>, Arc<Window>>,
     mouse_pos: PhysicalPosition<f64>,
-    clipboard: ClipboardContent
+    clipboard: ClipboardContent,
 }
 
 impl PartialEq for Note {
@@ -192,8 +200,8 @@ impl Note {
         let arc_window = Arc::new(window);
 
         let context = Context::new(arc_window.clone()).unwrap();
-        let mut surface = Surface::new(&context, arc_window.clone()).unwrap();
-    
+        let surface = Surface::new(&context, arc_window.clone()).unwrap();
+
         let mouse_pos: PhysicalPosition<f64> = PhysicalPosition::new(0.0, 0.0);
 
         let window_id = arc_window.clone().id();
@@ -201,16 +209,18 @@ impl Note {
         Note {
             window: arc_window.clone(),
             window_id,
-            context,
             surface,
             mouse_pos,
-            clipboard
+            clipboard,
         }
     }
 }
 
 fn create_event_loop() -> EventLoop<MyUserEvent> {
-    let event_loop: EventLoop<MyUserEvent> = EventLoopBuilder::with_user_event().with_any_thread(true).build().unwrap();
+    let event_loop: EventLoop<MyUserEvent> = EventLoopBuilder::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -233,7 +243,7 @@ fn draw_debug_rect<'a>(pixmap: &'a mut Pixmap, x: i32, y: i32, w: i32, h: i32) {
         Rect::from_xywh(
             x as f32, 
             y as f32, 
-            w as f32, 
+            w as f32,
             h as f32
         ).unwrap());
 
@@ -241,251 +251,317 @@ fn draw_debug_rect<'a>(pixmap: &'a mut Pixmap, x: i32, y: i32, w: i32, h: i32) {
     paint.set_color_rgba8(220, 0, 0, 255);
 
     pixmap.fill_path(
-            &path,
-            &paint,
-            FillRule::EvenOdd,
-            Transform::identity(),
-            None,
-        );
+        &path,
+        &paint,
+        FillRule::EvenOdd,
+        Transform::identity(),
+        None,
+    );
 }
 
 fn run_event_loop(event_loop: EventLoop<MyUserEvent>, windows: RefCell<Vec<Note>>) {
-    let font: Font = Font::from_bytes(include_bytes!("../resources/Roboto.ttf") as &[u8], FontSettings::default()).unwrap();
+    let font: Font = Font::from_bytes(
+        include_bytes!("../resources/Roboto.ttf") as &[u8],
+        FontSettings::default(),
+    )
+    .unwrap();
 
-    event_loop.run(move |event, elwt| {
-        let mut windows_local = windows.borrow_mut();
+    event_loop
+        .run(move |event, elwt| {
+            let mut windows_local = windows.borrow_mut();
 
-        match event {
-            Event::Resumed => {},
-            Event::UserEvent(win) => {
-                let mut built = win.window_builder.build(&elwt).unwrap();
-                let mut win = Note::new(built, win.clipboard);
-                windows_local.push(win);
-            },
-            Event::WindowEvent { window_id, event } => {
-                let mut win = match get_window(windows_local.iter_mut(), window_id) {
-                    Some(i) => i,
-                    None => {return;},
-                };
+            match event {
+                Event::Resumed => {}
+                Event::UserEvent(win) => {
+                    let built = win.window_builder.build(&elwt).unwrap();
+                    let win = Note::new(built, win.clipboard);
+                    windows_local.push(win);
+                }
+                Event::WindowEvent { window_id, event } => {
+                    let win = match get_window(windows_local.iter_mut(), window_id) {
+                        Some(i) => i,
+                        None => {
+                            return;
+                        }
+                    };
 
-                match event {
-                    WindowEvent::MouseInput { device_id, state, button } => {
-                        // dbg!((device_id, state, button));
+                    match event {
+                        WindowEvent::MouseInput {
+                            device_id: _,
+                            state,
+                            button,
+                        } => {
+                            // dbg!((device_id, state, button));
 
-                        let (width, height) = {
-                            let size = win.window.inner_size();
-                            (size.width as f64, size.height as f64)
-                        };
+                            let (width, height) = {
+                                let size = win.window.inner_size();
+                                (size.width as f64, size.height as f64)
+                            };
 
-                        if button == MouseButton::Left && state.is_pressed() {
-                            if win.mouse_pos.x > width - 30.0 && win.mouse_pos.y < 30.0 {         // close button
-                                win.window.set_visible(false);
-                                windows_local.remove_elem(|e| e.window_id == window_id);
-                            } else if win.mouse_pos.x < 20.0 && win.mouse_pos.y < 20.0 {          // west north
-                                win.window.drag_resize_window(ResizeDirection::NorthWest).unwrap();
-                            } else if win.mouse_pos.x < 20.0 && win.mouse_pos.y > height - 20.0 { // west south
-                                win.window.drag_resize_window(ResizeDirection::SouthWest).unwrap();
-                            } else if win.mouse_pos.x > width - 20.0 && win.mouse_pos.y < 20.0 {  // east north
-                                win.window.drag_resize_window(ResizeDirection::NorthEast).unwrap();
-                            } else if win.mouse_pos.x > width - 20.0 && win.mouse_pos.y > height - 20.0 { // east south
-                                win.window.drag_resize_window(ResizeDirection::SouthEast).unwrap();
-                            } else if win.mouse_pos.y < 20.0 && win.mouse_pos.x < 20.0 {          // north west
-                                win.window.drag_resize_window(ResizeDirection::NorthWest).unwrap();
-                            } else if win.mouse_pos.y < 20.0 && win.mouse_pos.x > width - 20.0 {  // north east
-                                win.window.drag_resize_window(ResizeDirection::NorthEast).unwrap();
-                            } else if win.mouse_pos.y > height - 20.0 && win.mouse_pos.x < 20.0 { // south west
-                                win.window.drag_resize_window(ResizeDirection::SouthWest).unwrap();
-                            } else if win.mouse_pos.y > height - 20.0 && win.mouse_pos.x > width - 20.0 { // south east
-                                win.window.drag_resize_window(ResizeDirection::SouthEast).unwrap();
-                            } else if win.mouse_pos.x < 20.0 {                                // west
-                                win.window.drag_resize_window(ResizeDirection::West).unwrap();
-                            } else if win.mouse_pos.x > width - 20.0 {                        // east
-                                win.window.drag_resize_window(ResizeDirection::East).unwrap();
-                            } else if win.mouse_pos.y > height - 20.0 {                       // south
-                                win.window.drag_resize_window(ResizeDirection::South).unwrap();
-                            } else if win.mouse_pos.y < 20.0 {                                // north
-                                win.window.drag_resize_window(ResizeDirection::North).unwrap();
-                            } else {                                                      // else
-                                win.window.drag_window();
+                            if button == MouseButton::Left && state.is_pressed() {
+                                if win.mouse_pos.x > width - 30.0 && win.mouse_pos.y < 30.0 {
+                                    // close button
+                                    win.window.set_visible(false);
+                                    windows_local.remove_elem(|e| e.window_id == window_id);
+                                } else if win.mouse_pos.x < 20.0 && win.mouse_pos.y < 20.0 {
+                                    // west north
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::NorthWest)
+                                        .unwrap();
+                                } else if win.mouse_pos.x < 20.0 && win.mouse_pos.y > height - 20.0
+                                {
+                                    // west south
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::SouthWest)
+                                        .unwrap();
+                                } else if win.mouse_pos.x > width - 20.0 && win.mouse_pos.y < 20.0 {
+                                    // east north
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::NorthEast)
+                                        .unwrap();
+                                } else if win.mouse_pos.x > width - 20.0
+                                    && win.mouse_pos.y > height - 20.0
+                                {
+                                    // east south
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::SouthEast)
+                                        .unwrap();
+                                } else if win.mouse_pos.y < 20.0 && win.mouse_pos.x < 20.0 {
+                                    // north west
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::NorthWest)
+                                        .unwrap();
+                                } else if win.mouse_pos.y < 20.0 && win.mouse_pos.x > width - 20.0 {
+                                    // north east
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::NorthEast)
+                                        .unwrap();
+                                } else if win.mouse_pos.y > height - 20.0 && win.mouse_pos.x < 20.0
+                                {
+                                    // south west
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::SouthWest)
+                                        .unwrap();
+                                } else if win.mouse_pos.y > height - 20.0
+                                    && win.mouse_pos.x > width - 20.0
+                                {
+                                    // south east
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::SouthEast)
+                                        .unwrap();
+                                } else if win.mouse_pos.x < 20.0 {
+                                    // west
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::West)
+                                        .unwrap();
+                                } else if win.mouse_pos.x > width - 20.0 {
+                                    // east
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::East)
+                                        .unwrap();
+                                } else if win.mouse_pos.y > height - 20.0 {
+                                    // south
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::South)
+                                        .unwrap();
+                                } else if win.mouse_pos.y < 20.0 {
+                                    // north
+                                    win.window
+                                        .drag_resize_window(ResizeDirection::North)
+                                        .unwrap();
+                                } else {
+                                    // else
+                                    win.window.drag_window().unwrap();
+                                }
                             }
                         }
-                    },
-                    WindowEvent::CursorMoved { device_id, position } => {
-                        win.mouse_pos = position;
+                        WindowEvent::CursorMoved {
+                            device_id: _,
+                            position,
+                        } => {
+                            win.mouse_pos = position;
 
-                        let (width, height) = {
-                            let size = win.window.inner_size();
-                            (size.width as f64, size.height as f64)
-                        };
+                            let (width, height) = {
+                                let size = win.window.inner_size();
+                                (size.width as f64, size.height as f64)
+                            };
 
-                        if position.x > width - 30.0 && position.y < 30.0 {
-                            win.window.set_cursor_icon(CursorIcon::Pointer);
-                        } else if position.x < 20.0 || position.x > width - 20.0 {
-                            win.window.set_cursor_icon(CursorIcon::EwResize)
-                        } else if position.y < 20.0 || position.y > height - 20.0 {
-                            win.window.set_cursor_icon(CursorIcon::NsResize)
-                        } else {
-                            win.window.set_cursor_icon(CursorIcon::Pointer);
+                            if position.x > width - 30.0 && position.y < 30.0 {
+                                win.window.set_cursor_icon(CursorIcon::Pointer);
+                            } else if position.x < 20.0 || position.x > width - 20.0 {
+                                win.window.set_cursor_icon(CursorIcon::EwResize)
+                            } else if position.y < 20.0 || position.y > height - 20.0 {
+                                win.window.set_cursor_icon(CursorIcon::NsResize)
+                            } else {
+                                win.window.set_cursor_icon(CursorIcon::Pointer);
+                            }
                         }
-                    },
-                    WindowEvent::RedrawRequested => {
-                        let (width, height) = {
-                            let size = win.window.inner_size();
-                            (size.width, size.height)
-                        };
-                        win.surface
-                            .resize(
-                                NonZeroU32::new(width).unwrap(),
-                                NonZeroU32::new(height).unwrap(),
-                            )
-                            .unwrap();
-        
-                        let mut pixmap = Pixmap::new(width, height).unwrap();
-                        pixmap.fill(Color::from_rgba8(250, 250, 120, 250));
+                        WindowEvent::RedrawRequested => {
+                            let (width, height) = {
+                                let size = win.window.inner_size();
+                                (size.width, size.height)
+                            };
+                            win.surface
+                                .resize(
+                                    NonZeroU32::new(width).unwrap(),
+                                    NonZeroU32::new(height).unwrap(),
+                                )
+                                .unwrap();
 
-                        let mut pixmap_paint = PixmapPaint::default();
+                            let mut pixmap = Pixmap::new(width, height).unwrap();
+                            pixmap.fill(Color::from_rgba8(250, 250, 120, 250));
 
-                        match &win.clipboard {
-                            ClipboardContent::Text(t) => {
-                                let win_size: (f32,f32) = (width as f32, height as f32);
-                                let text_table_size: (f32,f32) = {
-                                    let pix = render_text_with_ln(
-                                        t.to_string(), 
-                                        10.0,
-                                        &font, 
-                                        12,
-                                        Color::from_rgba8(255, 0, 0, 255)
+                            let pixmap_paint = PixmapPaint::default();
+
+                            match &win.clipboard {
+                                ClipboardContent::Text(t) => {
+                                    let win_size: (f32, f32) = (width as f32, height as f32);
+                                    let text_table_size: (f32, f32) = {
+                                        let pix = render_text_with_ln(
+                                            t.to_string(),
+                                            10.0,
+                                            &font,
+                                            12,
+                                            Color::from_rgba8(255, 0, 0, 255),
+                                        );
+                                        (pix.width() as f32 / 10.0, pix.height() as f32 / 10.0)
+                                    };
+
+                                    // dbg!(&text_table_size);
+
+                                    let text_size = cmp::min(
+                                        (win_size.1 / text_table_size.1) as i32,
+                                        (win_size.0 / text_table_size.0) as i32,
+                                    ) as f32;
+
+                                    let text_pixmap = render_text_with_ln(
+                                        t.to_string(),
+                                        text_size,
+                                        &font,
+                                        (text_size * 1.2) as i32,
+                                        Color::from_rgba8(255, 0, 0, 255),
                                     );
-                                    (
-                                        pix.width() as f32 / 10.0,
-                                        pix.height() as f32 / 10.0
-                                    )
-                                };
 
-                                // dbg!(&text_table_size);
+                                    let text_pos = (
+                                        width as i32 / 2 - text_pixmap.width() as i32 / 2,
+                                        height as i32 / 2 - text_pixmap.height() as i32 / 2,
+                                    );
 
-                                let text_size = cmp::min(
-                                    (win_size.1 / text_table_size.1) as i32, 
-                                    (win_size.0 / text_table_size.0) as i32
-                                ) as f32;
+                                    // draw_debug_rect(
+                                    //     &mut pixmap,
+                                    //     text_pos.0 as i32,
+                                    //     text_pos.1 as i32,
+                                    //     text_pixmap.width() as i32,
+                                    //     text_pixmap.height() as i32
+                                    // );
 
-                                let mut text_pixmap = render_text_with_ln(
-                                    t.to_string(), 
-                                    text_size, 
-                                    &font, 
-                                    (text_size * 1.2) as i32,
-                                    Color::from_rgba8(255, 0, 0, 255)
-                                );
+                                    pixmap.draw_pixmap(
+                                        text_pos.0,
+                                        text_pos.1,
+                                        text_pixmap.as_ref(),
+                                        &pixmap_paint,
+                                        Transform::identity(),
+                                        None,
+                                    );
+                                }
+                                ClipboardContent::Image(im) => {
+                                    let image_pixmap = render_image(im.clone());
 
-                                let text_pos = (
-                                    width as i32 / 2 - text_pixmap.width() as i32 / 2,
-                                    height as i32 / 2 - text_pixmap.height() as i32 / 2
-                                );
+                                    let win_size: (f32, f32) = (width as f32, height as f32);
+                                    let image_size: (f32, f32) =
+                                        (image_pixmap.width() as f32, image_pixmap.height() as f32);
+                                    let image_scale =
+                                        (win_size.0 / image_size.0, win_size.1 / image_size.1);
 
-                                // draw_debug_rect(
-                                //     &mut pixmap, 
-                                //     text_pos.0 as i32, 
-                                //     text_pos.1 as i32, 
-                                //     text_pixmap.width() as i32, 
-                                //     text_pixmap.height() as i32
-                                // );
+                                    let image_pos: (i32, i32) = (0, 0);
 
-                                pixmap.draw_pixmap(text_pos.0, text_pos.1, text_pixmap.as_ref(), &pixmap_paint, Transform::identity(), None);
-                            }, 
-                            ClipboardContent::Image(im) => {
-                                let mut image_pixmap = render_image(im.clone());
+                                    pixmap.draw_pixmap(
+                                        image_pos.0,
+                                        image_pos.1,
+                                        image_pixmap.as_ref(),
+                                        &pixmap_paint,
+                                        Transform::from_scale(image_scale.0, image_scale.1),
+                                        None,
+                                    );
+                                }
+                                _ => {}
+                            }
 
-                                let win_size: (f32,f32) = (width as f32, height as f32);
-                                let image_size: (f32,f32) = (image_pixmap.width() as f32, image_pixmap.height() as f32);
-                                let image_scale = (win_size.0 / image_size.0, win_size.1 / image_size.1);
+                            let path = PathBuilder::from_rect(
+                                Rect::from_xywh(width as f32 - 30.0, 0.0, 30.0, 30.0).unwrap(),
+                            );
 
-                                let image_pos: (i32, i32) = (0,0);
+                            let mut paint = Paint::default();
+                            paint.set_color_rgba8(220, 80, 80, 150);
 
-                                pixmap.draw_pixmap(
-                                    image_pos.0, 
-                                    image_pos.1, 
-                                    image_pixmap.as_ref(), 
-                                    &pixmap_paint, 
-                                    Transform::from_scale(
-                                        image_scale.0, 
-                                        image_scale.1), 
-                                    None);
-                            },
-                            _ => {},
+                            pixmap.fill_path(
+                                &path,
+                                &paint,
+                                FillRule::EvenOdd,
+                                Transform::identity(),
+                                None,
+                            );
+
+                            let mut path = PathBuilder::new();
+                            path.move_to(width as f32 - 22.5, 2.5);
+                            path.line_to(width as f32 - 2.5, 27.5);
+                            path.line_to(width as f32 - 5.0, 27.5);
+                            path.line_to(width as f32 - 25.0, 2.5);
+                            path.line_to(width as f32 - 22.5, 2.5);
+
+                            let path = path.finish().unwrap();
+
+                            let mut paint = Paint::default();
+                            paint.set_color_rgba8(220, 220, 220, 255);
+
+                            pixmap.fill_path(
+                                &path,
+                                &paint,
+                                FillRule::EvenOdd,
+                                Transform::identity(),
+                                None,
+                            );
+
+                            let mut path = PathBuilder::new();
+
+                            path.move_to(width as f32 - 5.0, 2.5);
+                            path.line_to(width as f32 - 25.0, 27.5);
+                            path.line_to(width as f32 - 22.5, 27.5);
+                            path.line_to(width as f32 - 2.5, 2.5);
+                            path.line_to(width as f32 - 5.0, 2.5);
+
+                            let path = path.finish().unwrap();
+
+                            pixmap.fill_path(
+                                &path,
+                                &paint,
+                                FillRule::EvenOdd,
+                                Transform::identity(),
+                                None,
+                            );
+
+                            let mut buffer = win.surface.buffer_mut().unwrap();
+                            for index in 0..(width * height) as usize {
+                                buffer[index] = pixmap.data()[index * 4 + 2] as u32
+                                    | (pixmap.data()[index * 4 + 1] as u32) << 8
+                                    | (pixmap.data()[index * 4] as u32) << 16;
+                            }
+
+                            buffer.present().unwrap();
                         }
-
-                        let path = PathBuilder::from_rect(Rect::from_xywh(width as f32 - 30.0, 0.0, 30.0, 30.0).unwrap());
-
-                        let mut paint = Paint::default();
-                        paint.set_color_rgba8(220, 80, 80, 150);
-
-                        pixmap.fill_path(
-                                &path,
-                                &paint,
-                                FillRule::EvenOdd,
-                                Transform::identity(),
-                                None,
-                            );
-
-                        let mut path = PathBuilder::new();
-                        path.move_to(width as f32 - 22.5, 2.5);
-                        path.line_to(width as f32 - 2.5, 27.5);
-                        path.line_to(width as f32 - 5.0, 27.5);
-                        path.line_to(width as f32 - 25.0, 2.5);
-                        path.line_to(width as f32 - 22.5, 2.5);
-
-                        let path = path.finish().unwrap();
-
-                        let mut paint = Paint::default();
-                        paint.set_color_rgba8(220, 220, 220, 255);
-
-                        pixmap.fill_path(
-                                &path,
-                                &paint,
-                                FillRule::EvenOdd,
-                                Transform::identity(),
-                                None,
-                            );
-                        
-                        let mut path = PathBuilder::new();
-
-                        path.move_to(width as f32 - 5.0, 2.5);
-                        path.line_to(width as f32 - 25.0, 27.5);
-                        path.line_to(width as f32 - 22.5, 27.5);
-                        path.line_to(width as f32 - 2.5, 2.5);
-                        path.line_to(width as f32 - 5.0, 2.5);
-
-                        let path = path.finish().unwrap();
-
-                        pixmap.fill_path(
-                                &path,
-                                &paint,
-                                FillRule::EvenOdd,
-                                Transform::identity(),
-                                None,
-                            );
-        
-                        let mut buffer = win.surface.buffer_mut().unwrap();
-                        for index in 0..(width * height) as usize {
-                            buffer[index] = pixmap.data()[index * 4 + 2] as u32
-                                | (pixmap.data()[index * 4 + 1] as u32) << 8
-                                | (pixmap.data()[index * 4] as u32) << 16;
-                        }
-        
-                        buffer.present().unwrap();
-                    },
-                    _ => (),
+                        _ => (),
+                    }
                 }
-            },
-            _ => (),
-        }
-    }).unwrap();
+                _ => (),
+            }
+        })
+        .unwrap();
 }
 
 #[derive(Debug)]
 struct MyUserEvent {
     window_builder: WindowBuilder,
-    clipboard: ClipboardContent
+    clipboard: ClipboardContent,
 }
 
 fn popup_clipboard(content: ClipboardContent) -> MyUserEvent {
@@ -494,19 +570,22 @@ fn popup_clipboard(content: ClipboardContent) -> MyUserEvent {
             .with_enabled_buttons(WindowButtons::empty())
             .with_decorations(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_title("FONotes - ".to_owned() + (match content {
-                ClipboardContent::Image(_) => "Image",
-                ClipboardContent::Text(_) => "Text",
-                _ => "???"
-            }))
+            .with_title(
+                "FONotes - ".to_owned()
+                    + (match content {
+                        ClipboardContent::Image(_) => "Image",
+                        ClipboardContent::Text(_) => "Text",
+                        _ => "???",
+                    }),
+            )
             .with_inner_size(match &content {
                 ClipboardContent::Image(i) => LogicalSize::new(i.width as f32, i.height as f32),
-                _ => LogicalSize::new(250.0, 300.0)
+                _ => LogicalSize::new(250.0, 300.0),
             })
             .with_resizable(true)
             .with_visible(true)
             .with_min_inner_size(LogicalSize::new(50.0, 50.0)),
-        clipboard: content
+        clipboard: content,
     }
 }
 
@@ -526,17 +605,21 @@ fn main() {
                     pressed.push(key);
                 }
 
-                if key == Key::KeyN && 
-                        pressed.contains(&Key::ControlLeft) && 
-                        pressed.contains(&Key::Alt) {
-                    event_loop_proxy.send_event(popup_clipboard(get_clipboard(&mut clipboard))).unwrap();
+                if key == Key::KeyN
+                    && pressed.contains(&Key::ControlLeft)
+                    && pressed.contains(&Key::Alt)
+                {
+                    event_loop_proxy
+                        .send_event(popup_clipboard(get_clipboard(&mut clipboard)))
+                        .unwrap();
                 }
             } else if let EventType::KeyRelease(key) = event.event_type {
                 if pressed.contains(&key) {
                     pressed.remove(pressed.iter().position(|x| *x == key).unwrap());
                 }
             }
-        }).unwrap();
+        })
+        .unwrap();
     });
 
     run_event_loop(event_loop, windows);
