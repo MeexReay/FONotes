@@ -5,6 +5,7 @@ use std::ops::Deref;
 use std::os::linux::raw::stat;
 use send_wrapper::SendWrapper;
 use std::sync::mpsc::channel;
+use std::cmp;
 
 use fontdue::{Font, FontSettings};
 use fontdue::layout::{Layout, CoordinateSystem, TextStyle};
@@ -33,7 +34,7 @@ use core::slice::IterMut;
 
 #[derive(Debug)]
 enum ClipboardContent {
-    Image(Vec<u8>),
+    Image(ImageData<'static>),
     Text(String),
     None
 }
@@ -41,7 +42,7 @@ enum ClipboardContent {
 fn get_clipboard(clipboard: &mut Clipboard) -> ClipboardContent {
     match clipboard.get_image() {
         Ok(i) => {
-            ClipboardContent::Image(i.bytes.to_vec())
+            ClipboardContent::Image(i.to_owned_img())
         }, Err(e) => {
             match clipboard.get_text() {
                 Ok(i) => {
@@ -88,15 +89,15 @@ fn render_text(text: String, font_size: f32, font: &Font, color: Color) -> Pixma
     for gl in layout.glyphs() {
         let ch = gl.parent;
 
-        let height = gl.y as u32 + gl.height as u32;
+        let height = gl.y as i32 + gl.height as i32;
 
         let rendered = render_char(ch, font_size, font, color);
-        text_width = gl.x as u32 + gl.width as u32;
+        text_width = gl.x as i32 + gl.width as i32;
         if height > max_height { max_height = height; }
         chars.push((rendered, gl.x, gl.y));
     }
 
-    let mut pixmap = match Pixmap::new(text_width, max_height) {
+    let mut pixmap = match Pixmap::new(text_width as u32, max_height as u32) {
         Some(i) => {i},
         None => { return Pixmap::new(1, 1).unwrap(); },
     };
@@ -118,27 +119,34 @@ fn render_text(text: String, font_size: f32, font: &Font, color: Color) -> Pixma
     pixmap
 }
 
-fn render_text_with_ln(text: String, size: f32, font: &Font, char_padding: usize, line_padding: usize, color: Color) -> Pixmap {
+fn render_text_with_ln(text: String, size: f32, font: &Font, line_height: i32, color: Color) -> Pixmap {
     let mut width = 0;
-    let mut line_height = 0;
     let mut lines: Vec<Pixmap> = Vec::new();
     for ele in text.split("\n") {
         let rendered = render_text(ele.to_string(), size, font, color);
         if rendered.width() > width { width = rendered.width(); }
-        if rendered.height() > line_height { line_height = rendered.height(); }
         lines.push(rendered);
     }
-    let height = (line_height + line_padding as u32) * lines.len() as u32;
+    let height = (line_height * lines.len() as i32) as i32;
 
-    let mut pixmap = Pixmap::new(width, height).unwrap();
+    let mut pixmap = Pixmap::new(width, height as u32).unwrap();
     let paint = PixmapPaint::default();
 
-    let mut y: u32 = 0;
+    let mut y: i32 = 0;
     for ele in lines {
-        pixmap.draw_pixmap(0, (y + (line_height - ele.height())) as i32, ele.as_ref(), &paint, Transform::identity(), None);
-        y += line_height + line_padding as u32;
+        pixmap.draw_pixmap(0, (y + (line_height - ele.height() as i32)) as i32, ele.as_ref(), &paint, Transform::identity(), None);
+        y += line_height;
     }
 
+    pixmap
+}
+
+fn render_image(image: ImageData<'static>) -> Pixmap {
+    let mut pixmap = Pixmap::new(image.width as u32, image.height as u32).unwrap();
+    let data: &mut [u8] = pixmap.data_mut();
+    for i in 0..image.bytes.len() {
+        data[i] = image.bytes[i];
+    }
     pixmap
 }
 
@@ -218,6 +226,27 @@ fn get_window<'a>(windows: IterMut<'a, Note>, id: WindowId) -> Option<&'a mut No
     }
 
     None
+}
+
+fn draw_debug_rect<'a>(pixmap: &'a mut Pixmap, x: i32, y: i32, w: i32, h: i32) {
+    let path = PathBuilder::from_rect(
+        Rect::from_xywh(
+            x as f32, 
+            y as f32, 
+            w as f32, 
+            h as f32
+        ).unwrap());
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(220, 0, 0, 255);
+
+    pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::EvenOdd,
+            Transform::identity(),
+            None,
+        );
 }
 
 fn run_event_loop(event_loop: EventLoop<MyUserEvent>, windows: RefCell<Vec<Note>>) {
@@ -314,6 +343,77 @@ fn run_event_loop(event_loop: EventLoop<MyUserEvent>, windows: RefCell<Vec<Note>
                         let mut pixmap = Pixmap::new(width, height).unwrap();
                         pixmap.fill(Color::from_rgba8(250, 250, 120, 250));
 
+                        let mut pixmap_paint = PixmapPaint::default();
+
+                        match &win.clipboard {
+                            ClipboardContent::Text(t) => {
+                                let win_size: (f32,f32) = (width as f32, height as f32);
+                                let text_table_size: (f32,f32) = {
+                                    let pix = render_text_with_ln(
+                                        t.to_string(), 
+                                        10.0,
+                                        &font, 
+                                        12,
+                                        Color::from_rgba8(255, 0, 0, 255)
+                                    );
+                                    (
+                                        pix.width() as f32 / 10.0,
+                                        pix.height() as f32 / 10.0
+                                    )
+                                };
+
+                                // dbg!(&text_table_size);
+
+                                let text_size = cmp::min(
+                                    (win_size.1 / text_table_size.1) as i32, 
+                                    (win_size.0 / text_table_size.0) as i32
+                                ) as f32;
+
+                                let mut text_pixmap = render_text_with_ln(
+                                    t.to_string(), 
+                                    text_size, 
+                                    &font, 
+                                    (text_size * 1.2) as i32,
+                                    Color::from_rgba8(255, 0, 0, 255)
+                                );
+
+                                let text_pos = (
+                                    width as i32 / 2 - text_pixmap.width() as i32 / 2,
+                                    height as i32 / 2 - text_pixmap.height() as i32 / 2
+                                );
+
+                                // draw_debug_rect(
+                                //     &mut pixmap, 
+                                //     text_pos.0 as i32, 
+                                //     text_pos.1 as i32, 
+                                //     text_pixmap.width() as i32, 
+                                //     text_pixmap.height() as i32
+                                // );
+
+                                pixmap.draw_pixmap(text_pos.0, text_pos.1, text_pixmap.as_ref(), &pixmap_paint, Transform::identity(), None);
+                            }, 
+                            ClipboardContent::Image(im) => {
+                                let mut image_pixmap = render_image(im.clone());
+
+                                let win_size: (f32,f32) = (width as f32, height as f32);
+                                let image_size: (f32,f32) = (image_pixmap.width() as f32, image_pixmap.height() as f32);
+                                let image_scale = (win_size.0 / image_size.0, win_size.1 / image_size.1);
+
+                                let image_pos: (i32, i32) = (0,0);
+
+                                pixmap.draw_pixmap(
+                                    image_pos.0, 
+                                    image_pos.1, 
+                                    image_pixmap.as_ref(), 
+                                    &pixmap_paint, 
+                                    Transform::from_scale(
+                                        image_scale.0, 
+                                        image_scale.1), 
+                                    None);
+                            },
+                            _ => {},
+                        }
+
                         let path = PathBuilder::from_rect(Rect::from_xywh(width as f32 - 30.0, 0.0, 30.0, 30.0).unwrap());
 
                         let mut paint = Paint::default();
@@ -364,19 +464,6 @@ fn run_event_loop(event_loop: EventLoop<MyUserEvent>, windows: RefCell<Vec<Note>
                                 Transform::identity(),
                                 None,
                             );
-
-                        let mut paint = PixmapPaint::default();
-
-                        match &win.clipboard {
-                            ClipboardContent::Text(t) => {
-                                pixmap.draw_pixmap(20, 20, 
-                                    render_text_with_ln(t.to_string(), 
-                                        50.0, &font, 5, 20, Color::from_rgba8(255, 0, 0, 255)).as_ref(), 
-                                    &paint, Transform::identity(), None);
-                            }, 
-                            ClipboardContent::Image(i) => {},
-                            _ => {},
-                        }
         
                         let mut buffer = win.surface.buffer_mut().unwrap();
                         for index in 0..(width * height) as usize {
@@ -412,7 +499,10 @@ fn popup_clipboard(content: ClipboardContent) -> MyUserEvent {
                 ClipboardContent::Text(_) => "Text",
                 _ => "???"
             }))
-            .with_inner_size(LogicalSize::new(800.0, 600.0))
+            .with_inner_size(match &content {
+                ClipboardContent::Image(i) => LogicalSize::new(i.width as f32, i.height as f32),
+                _ => LogicalSize::new(250.0, 300.0)
+            })
             .with_resizable(true)
             .with_visible(true)
             .with_min_inner_size(LogicalSize::new(50.0, 50.0)),
