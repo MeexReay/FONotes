@@ -6,8 +6,8 @@ use std::os::linux::raw::stat;
 use send_wrapper::SendWrapper;
 use std::sync::mpsc::channel;
 
-use fontdue::Font;
-use tiny_skia::{Color, ColorU8, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use fontdue::{Font, FontSettings};
+use tiny_skia::{Color, ColorU8, FillRule, Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Rect, Stroke, Transform};
 use softbuffer::{Context, Surface};
 use arboard::{Clipboard, ImageData};
 
@@ -22,7 +22,7 @@ use winit::dpi::LogicalSize;
 
 use rdev::*;
 
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::sync::{Arc,Mutex,MutexGuard};
 use std::borrow::{BorrowMut, Cow};
 use std::cell::{Cell, Ref};
@@ -52,26 +52,44 @@ fn get_clipboard(clipboard: &mut Clipboard) -> ClipboardContent {
     }
 }
 
-fn render_text(text: String, size: f32, font: Font, color: Color) -> Pixmap {
-    let mut chars: Vec<((usize, usize), Vec<u8>)> = Vec::new();
-    for ele in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ele, size);
-        chars.push(((metrics.width, metrics.height), bitmap));
+fn render_char(ch: char, size: f32, font: &Font, color: Color) -> Pixmap {
+    let (metrics, bitmap) = font.rasterize(ch, size);
+
+    if ch == ' ' {
+        return Pixmap::new(size as u32, size as u32).unwrap()
     }
 
-    let width: usize = chars.iter().map(|i| i.0.0).sum();
-    let height: usize = chars.iter().map(|i| i.0.1).sum();
-    let mut pixmap = Pixmap::new(width as u32, height as u32).unwrap();
+    let mut pixmap = Pixmap::new(metrics.width as u32, metrics.height as u32).unwrap();
+    let data: &mut [u8] = pixmap.data_mut();
 
+    for j in 0..(metrics.width * metrics.height) {
+        data[j * 4] = color.red() as u8;
+        data[j * 4 + 1] = color.green() as u8;
+        data[j * 4 + 2] = color.blue() as u8;
+        data[j * 4 + 3] = bitmap[j];
+    }
+
+    pixmap
+}
+
+fn render_text(text: String, size: f32, font: &Font, char_padding: usize, color: Color) -> Pixmap {
+    let mut width = 0;
+    let mut height = 0;
+    let mut chars: Vec<Pixmap> = Vec::new();
+    for ele in text.chars() {
+        let rendered = render_char(ele, size, font, color);
+        width += rendered.width() + char_padding as u32;
+        if rendered.height() > height { height = rendered.height(); }
+        chars.push(rendered);
+    }
+
+    let mut pixmap = Pixmap::new(width, height).unwrap();
+    let paint = PixmapPaint::default();
+
+    let mut x: u32 = 0;
     for ele in chars {
-        let mut i: u32 = 0;
-        for x in 0..(ele.0.0) {
-            for y in 0..(ele.0.1) {
-                
-
-                i += 1;
-            }
-        }
+        pixmap.draw_pixmap(x as i32, 0, ele.as_ref(), &paint, Transform::identity(), None);
+        x += ele.width() + char_padding as u32;
     }
 
     pixmap
@@ -154,6 +172,8 @@ fn get_window<'a>(mut windows: IterMut<'a, Note>, id: WindowId) -> Option<&'a mu
 }
 
 fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec<Note>>) {
+    let font: Font = Font::from_bytes(include_bytes!("../resources/Roboto.ttf") as &[u8], FontSettings::default()).unwrap();
+
     event_loop.run(move |event, elwt| {
         let mut windows_local = windows.borrow_mut();
 
@@ -165,7 +185,10 @@ fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec
                 windows_local.push(win);
             },
             Event::WindowEvent { window_id, event } => {
-                let mut win = get_window(windows_local.iter_mut(), window_id).unwrap();
+                let mut win = match get_window(windows_local.iter_mut(), window_id) {
+                    Some(i) => i,
+                    None => {return;},
+                };
 
                 match event {
                     WindowEvent::MouseInput { device_id, state, button } => {
@@ -254,6 +277,51 @@ fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec
                                 Transform::identity(),
                                 None,
                             );
+
+                        let mut path = PathBuilder::new();
+                        path.move_to(width as f32 - 22.5, 2.5);
+                        path.line_to(width as f32 - 2.5, 27.5);
+                        path.line_to(width as f32 - 5.0, 27.5);
+                        path.line_to(width as f32 - 25.0, 2.5);
+                        path.line_to(width as f32 - 22.5, 2.5);
+
+                        let path = path.finish().unwrap();
+
+                        let mut paint = Paint::default();
+                        paint.set_color_rgba8(220, 220, 220, 255);
+
+                        pixmap.fill_path(
+                                &path,
+                                &paint,
+                                FillRule::EvenOdd,
+                                Transform::identity(),
+                                None,
+                            );
+                        
+                        let mut path = PathBuilder::new();
+
+                        path.move_to(width as f32 - 5.0, 2.5);
+                        path.line_to(width as f32 - 25.0, 27.5);
+                        path.line_to(width as f32 - 22.5, 27.5);
+                        path.line_to(width as f32 - 2.5, 2.5);
+                        path.line_to(width as f32 - 5.0, 2.5);
+
+                        let path = path.finish().unwrap();
+
+                        pixmap.fill_path(
+                                &path,
+                                &paint,
+                                FillRule::EvenOdd,
+                                Transform::identity(),
+                                None,
+                            );
+
+                        let mut paint = PixmapPaint::default();
+
+                        pixmap.draw_pixmap(20, 20, 
+                            render_text("THE QUICK BROWN FOX".to_owned(), 
+                                50.0, &font, 5, Color::from_rgba8(255, 0, 0, 255)).as_ref(), 
+                            &paint, Transform::identity(), None);
         
                         let mut buffer = win.surface.buffer_mut().unwrap();
                         for index in 0..(width * height) as usize {
@@ -314,7 +382,7 @@ fn main() {
                     pressed.remove(pressed.iter().position(|x| *x == key).unwrap());
                 }
             }
-        });
+        }).unwrap();
     });
 
     run_event_loop(event_loop, windows);
