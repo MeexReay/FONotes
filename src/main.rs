@@ -7,6 +7,7 @@ use send_wrapper::SendWrapper;
 use std::sync::mpsc::channel;
 
 use fontdue::{Font, FontSettings};
+use fontdue::layout::{Layout, CoordinateSystem, TextStyle};
 use tiny_skia::{Color, ColorU8, FillRule, Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Rect, Stroke, Transform};
 use softbuffer::{Context, Surface};
 use arboard::{Clipboard, ImageData};
@@ -30,8 +31,9 @@ use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use core::slice::IterMut;
 
-enum ClipboardContent<'a> {
-    Image(Cow<'a, [u8]>),
+#[derive(Debug)]
+enum ClipboardContent {
+    Image(Vec<u8>),
     Text(String),
     None
 }
@@ -39,7 +41,7 @@ enum ClipboardContent<'a> {
 fn get_clipboard(clipboard: &mut Clipboard) -> ClipboardContent {
     match clipboard.get_image() {
         Ok(i) => {
-            ClipboardContent::Image(i.bytes)
+            ClipboardContent::Image(i.bytes.to_vec())
         }, Err(e) => {
             match clipboard.get_text() {
                 Ok(i) => {
@@ -56,7 +58,9 @@ fn render_char(ch: char, size: f32, font: &Font, color: Color) -> Pixmap {
     let (metrics, bitmap) = font.rasterize(ch, size);
 
     if ch == ' ' {
-        return Pixmap::new(size as u32, size as u32).unwrap()
+        return Pixmap::new(size as u32, size as u32).unwrap();
+    } else if ch == '\t' {
+        return Pixmap::new(size as u32 * 2, size as u32).unwrap();
     }
 
     let mut pixmap = Pixmap::new(metrics.width as u32, metrics.height as u32).unwrap();
@@ -72,24 +76,67 @@ fn render_char(ch: char, size: f32, font: &Font, color: Color) -> Pixmap {
     pixmap
 }
 
-fn render_text(text: String, size: f32, font: &Font, char_padding: usize, color: Color) -> Pixmap {
-    let mut width = 0;
-    let mut height = 0;
-    let mut chars: Vec<Pixmap> = Vec::new();
-    for ele in text.chars() {
-        let rendered = render_char(ele, size, font, color);
-        width += rendered.width() + char_padding as u32;
-        if rendered.height() > height { height = rendered.height(); }
-        chars.push(rendered);
+fn render_text(text: String, font_size: f32, font: &Font, color: Color) -> Pixmap {
+    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+    layout.append(&[font], &TextStyle::new(&text, font_size, 0));
+
+    let mut text_width = 0;
+    let mut max_height = 0;
+
+    let mut chars: Vec<(Pixmap, f32, f32)> = Vec::new();
+
+    for gl in layout.glyphs() {
+        let ch = gl.parent;
+
+        let height = gl.y as u32 + gl.height as u32;
+
+        let rendered = render_char(ch, font_size, font, color);
+        text_width = gl.x as u32 + gl.width as u32;
+        if height > max_height { max_height = height; }
+        chars.push((rendered, gl.x, gl.y));
     }
+
+    let mut pixmap = match Pixmap::new(text_width, max_height) {
+        Some(i) => {i},
+        None => { return Pixmap::new(1, 1).unwrap(); },
+    };
+    let paint = PixmapPaint::default();
+
+    for jujuk in chars {
+        let ele = jujuk.0;
+        let pos = (jujuk.1, jujuk.2);
+
+        pixmap.draw_pixmap(
+            pos.0 as i32, 
+            pos.1 as i32, 
+            ele.as_ref(), 
+            &paint, 
+            Transform::identity(), 
+            None);
+    }
+
+    pixmap
+}
+
+fn render_text_with_ln(text: String, size: f32, font: &Font, char_padding: usize, line_padding: usize, color: Color) -> Pixmap {
+    let mut width = 0;
+    let mut line_height = 0;
+    let mut lines: Vec<Pixmap> = Vec::new();
+    for ele in text.split("\n") {
+        let rendered = render_text(ele.to_string(), size, font, color);
+        if rendered.width() > width { width = rendered.width(); }
+        if rendered.height() > line_height { line_height = rendered.height(); }
+        lines.push(rendered);
+    }
+    let height = (line_height + line_padding as u32) * lines.len() as u32;
 
     let mut pixmap = Pixmap::new(width, height).unwrap();
     let paint = PixmapPaint::default();
 
-    let mut x: u32 = 0;
-    for ele in chars {
-        pixmap.draw_pixmap(x as i32, 0, ele.as_ref(), &paint, Transform::identity(), None);
-        x += ele.width() + char_padding as u32;
+    let mut y: u32 = 0;
+    for ele in lines {
+        pixmap.draw_pixmap(0, (y + (line_height - ele.height())) as i32, ele.as_ref(), &paint, Transform::identity(), None);
+        y += line_height + line_padding as u32;
     }
 
     pixmap
@@ -122,7 +169,8 @@ struct Note {
     window_id: WindowId,
     context: Context<Arc<Window>>,
     surface: Surface<Arc<Window>, Arc<Window>>,
-    mouse_pos: PhysicalPosition<f64>
+    mouse_pos: PhysicalPosition<f64>,
+    clipboard: ClipboardContent
 }
 
 impl PartialEq for Note {
@@ -132,7 +180,7 @@ impl PartialEq for Note {
 }
 
 impl Note {
-    fn new(window: Window) -> Self {
+    fn new(window: Window, clipboard: ClipboardContent) -> Self {
         let arc_window = Arc::new(window);
 
         let context = Context::new(arc_window.clone()).unwrap();
@@ -147,13 +195,14 @@ impl Note {
             window_id,
             context,
             surface,
-            mouse_pos
+            mouse_pos,
+            clipboard
         }
     }
 }
 
-fn create_event_loop() -> EventLoop<WindowBuilder> {
-    let event_loop: EventLoop<WindowBuilder> = EventLoopBuilder::with_user_event().with_any_thread(true).build().unwrap();
+fn create_event_loop() -> EventLoop<MyUserEvent> {
+    let event_loop: EventLoop<MyUserEvent> = EventLoopBuilder::with_user_event().with_any_thread(true).build().unwrap();
 
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -161,7 +210,7 @@ fn create_event_loop() -> EventLoop<WindowBuilder> {
     event_loop
 }
 
-fn get_window<'a>(mut windows: IterMut<'a, Note>, id: WindowId) -> Option<&'a mut Note> {
+fn get_window<'a>(windows: IterMut<'a, Note>, id: WindowId) -> Option<&'a mut Note> {
     for note in windows {
         if note.window_id == id {
             return Some(note);
@@ -171,7 +220,7 @@ fn get_window<'a>(mut windows: IterMut<'a, Note>, id: WindowId) -> Option<&'a mu
     None
 }
 
-fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec<Note>>) {
+fn run_event_loop(event_loop: EventLoop<MyUserEvent>, windows: RefCell<Vec<Note>>) {
     let font: Font = Font::from_bytes(include_bytes!("../resources/Roboto.ttf") as &[u8], FontSettings::default()).unwrap();
 
     event_loop.run(move |event, elwt| {
@@ -180,8 +229,8 @@ fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec
         match event {
             Event::Resumed => {},
             Event::UserEvent(win) => {
-                let mut built = win.build(&elwt).unwrap();
-                let mut win = Note::new(built);
+                let mut built = win.window_builder.build(&elwt).unwrap();
+                let mut win = Note::new(built, win.clipboard);
                 windows_local.push(win);
             },
             Event::WindowEvent { window_id, event } => {
@@ -262,8 +311,8 @@ fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec
                             )
                             .unwrap();
         
-                        let mut pixmap = Pixmap::new(width, height).unwrap(); // берем 
-                        pixmap.fill(Color::WHITE);
+                        let mut pixmap = Pixmap::new(width, height).unwrap();
+                        pixmap.fill(Color::from_rgba8(250, 250, 120, 250));
 
                         let path = PathBuilder::from_rect(Rect::from_xywh(width as f32 - 30.0, 0.0, 30.0, 30.0).unwrap());
 
@@ -318,10 +367,16 @@ fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec
 
                         let mut paint = PixmapPaint::default();
 
-                        pixmap.draw_pixmap(20, 20, 
-                            render_text("THE QUICK BROWN FOX".to_owned(), 
-                                50.0, &font, 5, Color::from_rgba8(255, 0, 0, 255)).as_ref(), 
-                            &paint, Transform::identity(), None);
+                        match &win.clipboard {
+                            ClipboardContent::Text(t) => {
+                                pixmap.draw_pixmap(20, 20, 
+                                    render_text_with_ln(t.to_string(), 
+                                        50.0, &font, 5, 20, Color::from_rgba8(255, 0, 0, 255)).as_ref(), 
+                                    &paint, Transform::identity(), None);
+                            }, 
+                            ClipboardContent::Image(i) => {},
+                            _ => {},
+                        }
         
                         let mut buffer = win.surface.buffer_mut().unwrap();
                         for index in 0..(width * height) as usize {
@@ -340,20 +395,29 @@ fn run_event_loop<'a>(event_loop: EventLoop<WindowBuilder>, windows: RefCell<Vec
     }).unwrap();
 }
 
-fn popup_clipboard(content: ClipboardContent) -> WindowBuilder {
-    WindowBuilder::new()
-        .with_enabled_buttons(WindowButtons::empty())
-        .with_decorations(false)
-        .with_window_level(WindowLevel::AlwaysOnTop)
-        .with_title("FONotes - ".to_owned() + (match content {
-            ClipboardContent::Image(_) => "Image",
-            ClipboardContent::Text(_) => "Text",
-            _ => "???"
-        }))
-        .with_inner_size(LogicalSize::new(800.0, 600.0))
-        .with_resizable(true)
-        .with_visible(true)
-        .with_min_inner_size(LogicalSize::new(50.0, 50.0))
+#[derive(Debug)]
+struct MyUserEvent {
+    window_builder: WindowBuilder,
+    clipboard: ClipboardContent
+}
+
+fn popup_clipboard(content: ClipboardContent) -> MyUserEvent {
+    MyUserEvent {
+        window_builder: WindowBuilder::new()
+            .with_enabled_buttons(WindowButtons::empty())
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_title("FONotes - ".to_owned() + (match content {
+                ClipboardContent::Image(_) => "Image",
+                ClipboardContent::Text(_) => "Text",
+                _ => "???"
+            }))
+            .with_inner_size(LogicalSize::new(800.0, 600.0))
+            .with_resizable(true)
+            .with_visible(true)
+            .with_min_inner_size(LogicalSize::new(50.0, 50.0)),
+        clipboard: content
+    }
 }
 
 fn main() {
