@@ -1,3 +1,6 @@
+> [!WARNING]
+> Migrated to my selfhost [Gitea](https://git.meex.lol/MeexReay/FONotes)
+
 # FONotes (Fast Openable Notes)
 Create floating windows from clipboard content!<br>
 Hotkey is `Ctrl + Alt + N`
